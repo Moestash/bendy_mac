@@ -1,0 +1,16 @@
+# Keep the Windows PNG resources inside the macOS dylib as well. No runtime
+# asset directory or machine-specific source path is needed after installation.
+file(GLOB artwork_files CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/*.png")
+set(artwork_header "${CMAKE_CURRENT_BINARY_DIR}/generated/BendyArtwork.h")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(WRITE "${artwork_header}" "#pragma once\n#include <cstddef>\nnamespace BendyArtwork {\nstruct Image { const char* name; const unsigned char* bytes; std::size_t size; };\n")
+set(artwork_entries "")
+foreach(artwork IN LISTS artwork_files)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${artwork}")
+    get_filename_component(name "${artwork}" NAME_WE)
+    file(READ "${artwork}" bytes HEX)
+    string(REGEX REPLACE "(..)" "0x\\1," bytes "${bytes}")
+    file(APPEND "${artwork_header}" "static const unsigned char ${name}[] = {${bytes}};\n")
+    string(APPEND artwork_entries "{\"${name}\", ${name}, sizeof(${name})},\n")
+endforeach()
+file(APPEND "${artwork_header}" "static const Image images[] = {\n${artwork_entries}};\n}\n")

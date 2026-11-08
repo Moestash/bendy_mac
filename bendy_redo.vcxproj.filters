@@ -27,6 +27,9 @@
     <ClInclude Include="src\vstgui\plugguieditor.h">
       <Filter>src\vstgui</Filter>
     </ClInclude>
+    <ClInclude Include="src\BitmapFont.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="src\Plugin.h">
       <Filter>src</Filter>
     </ClInclude>

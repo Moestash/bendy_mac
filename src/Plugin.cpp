@@ -191,6 +191,34 @@ Plugin::Plugin(void* data)
 	sc->midiKnobName[4].value = L"Delay";
 	sc->range.value = 12;
 	_presets.push_back(sc);
+
+    // These CC numbers form MIDI Learn templates, not vendor-default maps.
+    // Keep new presets at the end so the existing factory indexes stay stable.
+    Preset* serum = new Preset();
+    serum->presetName = L"Serum Controller";
+    serum->range.value = 12;
+    serum->asdrCCName.value = L"AMP ENV";
+    const int serumCCs[] = {20, 21, 22, 23, 74, 71, 24, 25};
+    const wchar_t* serumNames[] = {L"Macro 1", L"Macro 2", L"Macro 3", L"Macro 4", L"Cutoff", L"Reso", L"WT Pos", L"FX Mix"};
+    for (int i = 0; i < 8; ++i)
+    {
+        serum->midiKnobCC[i].value = serumCCs[i];
+        serum->midiKnobName[i].value = serumNames[i];
+    }
+    for (int i = 0; i < 4; ++i) serum->asdrCC[i].value = 26 + i;
+    _presets.push_back(serum);
+
+    Preset* massive = new Preset();
+    massive->presetName = L"Massive Controller";
+    massive->range.value = 12;
+    massive->asdrCCName.value = L"AMP ENV";
+    for (int i = 0; i < 8; ++i)
+    {
+        massive->midiKnobCC[i].value = 20 + i;
+        massive->midiKnobName[i].value = L"Macro " + std::to_wstring(i + 1);
+    }
+    for (int i = 0; i < 4; ++i) massive->asdrCC[i].value = 28 + i;
+    _presets.push_back(massive);
 }
 
 Plugin::~Plugin()
@@ -360,7 +388,7 @@ intptr_t _stdcall Plugin::Dispatcher(intptr_t ID, intptr_t Index, intptr_t Value
 	}
 	else if (ID == FPD_SetPreset)
 	{
-		if (Index < _presets.size())
+		if (Index >= 0 && static_cast<size_t>(Index) < _presets.size())
 		{
 			Preset* p = _presets[Index];
 
@@ -369,6 +397,9 @@ intptr_t _stdcall Plugin::Dispatcher(intptr_t ID, intptr_t Index, intptr_t Value
 			s2.setPosition(0);
 
 			_state->preset.deserialize(&s2);
+            _ccHistory.clear();
+            _midiPitchCache.clear();
+            if (_gui) _gui->reconnect();
 			PlugHost->Dispatcher(HostTag, FHD_ShowEditor, 0, 0);
 			PlugHost->Dispatcher(HostTag, FHD_ShowEditor, 0, 1);
 

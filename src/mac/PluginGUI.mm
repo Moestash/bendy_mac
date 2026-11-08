@@ -2,11 +2,19 @@
 #include "mac/PluginGUI.h"
 #include "Plugin.h"
 #include "Parameter.h"
+#include "BitmapFont.h"
+#include "BendyArtwork.h"
+// The FL SDK uses a Windows-style BOOL macro; AppKit's BOOL has a different
+// ABI on Apple Silicon. Keep it out of Objective-C properties and overrides.
+#undef BOOL
+#include <algorithm>
 #include <atomic>
 #include <codecvt>
 #include <locale>
 
 namespace {
+constexpr CGFloat scale = 3; // Windows sScaleFactor, in macOS points.
+NSRect scaled(CGFloat x, CGFloat y, CGFloat w, CGFloat h) { return NSMakeRect(x*scale, y*scale, w*scale, h*scale); }
 NSString* text(const std::wstring& value)
 {
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
@@ -17,28 +25,296 @@ std::wstring toWideString(NSString* value)
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
     return converter.from_bytes(value.UTF8String ?: "");
 }
-NSTextField* label(NSString* value, NSRect rect)
+NSImage* artwork(NSString* name)
 {
-    NSTextField* field = [NSTextField labelWithString:value];
-    field.frame = rect;
-    return field;
+    static NSMutableDictionary<NSString*, NSImage*>* cache = [NSMutableDictionary dictionary];
+    if (cache[name]) return cache[name];
+    for (const auto& entry : BendyArtwork::images)
+    {
+        if (![name isEqualToString:[NSString stringWithUTF8String:entry.name]]) continue;
+        NSImage* original = [[NSImage alloc] initWithData:[NSData dataWithBytes:entry.bytes length:entry.size]];
+        CGImageRef source = [original CGImageForProposedRect:nullptr context:nil hints:nil];
+        const size_t width = CGImageGetWidth(source), height = CGImageGetHeight(source);
+        CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
+        CGContextRef bitmap = CGBitmapContextCreate(nullptr, width, height, 8, width*4, colors,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(colors);
+        CGContextDrawImage(bitmap, CGRectMake(0, 0, width, height), source);
+        auto pixels = static_cast<unsigned char*>(CGBitmapContextGetData(bitmap));
+        // The Windows resource builder turns the font atlas's magenta into alpha.
+        for (size_t i = 0; i < width*height; ++i)
+            if (pixels[i*4] == 255 && pixels[i*4+1] == 0 && pixels[i*4+2] == 255)
+                std::memset(pixels+i*4, 0, 4);
+        CGImageRef keyed = CGBitmapContextCreateImage(bitmap);
+        NSImage* image = [[NSImage alloc] initWithCGImage:keyed size:NSMakeSize(width, height)];
+        CGImageRelease(keyed);
+        CGContextRelease(bitmap);
+        cache[name] = image;
+        return image;
+    }
+    return nil;
+}
+void sprite(NSString* name, NSRect destination, NSRect source)
+{
+    NSImage* image = artwork(name);
+    NSGraphicsContext.currentContext.imageInterpolation = NSImageInterpolationNone;
+    // Source sprite sheets count rows down from the top.
+    source.origin.y = image.size.height - NSMaxY(source);
+    [image drawInRect:destination fromRect:source operation:NSCompositingOperationSourceOver
+        fraction:1 respectFlipped:YES hints:nil];
+}
+void bitmapText(const std::wstring& value, NSRect rect, NSTextAlignment alignment = NSTextAlignmentCenter)
+{
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(rect);
+    CGFloat width = value.size()*4*scale;
+    CGFloat x = rect.origin.x;
+    if (alignment == NSTextAlignmentCenter) x += (rect.size.width-width)/2;
+    if (alignment == NSTextAlignmentRight) x += rect.size.width-width;
+    for (wchar_t character : value)
+    {
+        int glyph = 31; // '?'
+        for (size_t i = 0; i < sizeof(kBendyBitmapCharacters)/sizeof(wchar_t); ++i)
+            if (kBendyBitmapCharacters[i] == character) { glyph = static_cast<int>(i); break; }
+        if (glyph >= 256) glyph = 31;
+        sprite(@"biosFontCaseSensitive_halfres", NSMakeRect(std::round(x), rect.origin.y, 4*scale, 4*scale),
+            NSMakeRect((glyph%16)*8, (glyph/16)*8, 8, 8));
+        x += 4*scale;
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+void bitmapNumber(int value, NSRect rect)
+{
+    std::string digits = std::to_string(value);
+    if (digits.size() > 2) digits = "--";
+    while (digits.size() < 2) digits = " " + digits;
+    for (int i = 0; i < 2; ++i)
+    {
+        int frame = digits[i] == ' ' ? 0 : digits[i] == '-' ? 11 : digits[i]-'0'+1;
+        sprite(@"bendyNumbers", NSMakeRect(rect.origin.x+i*7*scale, rect.origin.y, 6*scale, 7*scale), NSMakeRect(0, frame*7, 6, 7));
+    }
 }
 }
 
-// Targets store parameter indexes, never pointers into replaceable preset state.
-@interface BendyEditorController : NSObject <NSTextFieldDelegate>
+enum ControlKind { Spinner, Knob, Toggle, BitmapText, Expand, Presets };
+@class BendyEditorController;
+@interface BendyBitmapControl : NSControl
+@property(nonatomic, weak) BendyEditorController* controller;
+@property(nonatomic) ControlKind kind;
+@property(nonatomic, copy) NSString* spriteName;
+@property(nonatomic, copy) NSString* fixedText;
+@property(nonatomic, copy) NSString* prefix;
+@property(nonatomic) BOOL textMode;
+@property(nonatomic) BOOL arrows;
+@property(nonatomic) NSTextAlignment bitmapAlignment;
+@property(nonatomic) float displayedValue;
+@property(nonatomic) CGFloat dragStartY;
+@property(nonatomic) float dragStartValue;
+@property(nonatomic) BOOL dragging;
+- (void)step:(float)amount;
+@end
+
+@interface BendyBitmapEditor : NSView
+@property(nonatomic, weak) BendyEditorController* controller;
 @property(nonatomic, assign) Plugin* plugin;
-@property(nonatomic, strong) NSView* root;
-@property(nonatomic, strong) NSMutableDictionary<NSNumber*, NSControl*>* controls;
-@property(nonatomic, strong) NSMutableDictionary<NSNumber*, NSTextField*>* values;
-@property(nonatomic, strong) NSTabView* tabs;
-@property(nonatomic, strong) NSArray<NSButton*>* tabButtons;
+@property(nonatomic) BOOL expanded;
+- (void)animate;
+@end
+
+@interface BendyEditorController : NSObject
+@property(nonatomic, assign) Plugin* plugin;
+@property(nonatomic, strong) BendyBitmapEditor* root;
+@property(nonatomic, strong) NSMutableArray<BendyBitmapControl*>* controls;
+- (void)build;
 - (void)refresh;
-- (void)change:(NSControl*)sender;
-- (void)choosePreset:(NSPopUpButton*)sender;
+- (void)change:(BendyBitmapControl*)sender;
+- (void)edit:(BendyBitmapControl*)sender;
+- (void)showPresets:(NSView*)sender;
+- (void)choosePreset:(NSMenuItem*)sender;
+- (void)showParameterMenu:(BendyBitmapControl*)sender;
+- (NSMenu*)menuForParameter:(PlugParameter*)param;
 - (void)menuAction:(NSMenuItem*)sender;
-- (void)addParameter:(PlugParameter*)param toView:(NSView*)view y:(CGFloat)y;
-- (void)selectTab:(NSButton*)sender;
+- (void)selectValue:(NSMenuItem*)sender;
+- (void)setExpanded:(BOOL)expanded;
+@end
+
+@implementation BendyBitmapControl
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (float)floatValue { return self.displayedValue; }
+- (void)setFloatValue:(float)value { self.displayedValue = value; self.needsDisplay = YES; }
+- (NSString*)accessibilityRole
+{
+    if (self.kind == Toggle) return NSAccessibilityCheckBoxRole;
+    return self.kind == Knob || self.kind == Spinner ? NSAccessibilitySliderRole : NSAccessibilityButtonRole;
+}
+- (id)accessibilityValue
+{
+    Plugin* plugin = self.controller.plugin;
+    if (!plugin) return nil;
+    auto param = plugin->getParameterByIndex(static_cast<int>(self.tag));
+    return param && self.kind == BitmapText ? text(param->toString()) : @(self.floatValue);
+}
+- (BOOL)accessibilityPerformIncrement { [self step:1]; return YES; }
+- (BOOL)accessibilityPerformDecrement { [self step:-1]; return YES; }
+- (BOOL)accessibilityPerformPress
+{
+    if (self.kind == Toggle) { self.floatValue = self.floatValue > 0 ? 0 : 1; [self.controller change:self]; }
+    else if (self.kind == Expand) [self.controller setExpanded:!self.controller.root.expanded];
+    else if (self.kind == Presets) [self.controller showPresets:self];
+    else [self.controller edit:self];
+    return YES;
+}
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    Plugin* plugin = self.controller.plugin;
+    if (!plugin) return;
+    auto param = self.tag >= 0 ? plugin->getParameterByIndex(static_cast<int>(self.tag)) : nullptr;
+    if (self.kind == Toggle)
+    {
+        int frame = self.floatValue < 0 ? 2 : self.floatValue > 0 ? 1 : 0;
+        NSSize size = self.bounds.size;
+        sprite(self.spriteName, self.bounds, NSMakeRect(0, frame*size.height/scale, size.width/scale, size.height/scale));
+    }
+    else if (self.kind == Knob && param)
+    {
+        float normalized = (self.floatValue-param->getMin())/(param->getMax()-param->getMin());
+        int frame = static_cast<int>(std::fmax(0, std::fmin(1, normalized))*23);
+        sprite(@"knob", self.bounds, NSMakeRect(0, frame*11, 11, 11));
+    }
+    else if (self.kind == Spinner && param)
+    {
+        if (self.textMode)
+        {
+            NSRect area = self.bounds;
+            area.origin.x += self.arrows ? 8 : scale;
+            area.origin.y += area.size.height/2-4;
+            area.size.width -= self.arrows ? 38 : 2*scale;
+            bitmapText(param->toReadable(), area, self.bitmapAlignment);
+        }
+        else bitmapNumber(static_cast<int>(self.floatValue), scaled(2, 2, 13, 7));
+        if (self.arrows)
+        {
+            CGFloat x = self.bounds.size.width-9*scale;
+            sprite(@"bendySpinnerUp", NSMakeRect(x, 0, 9*scale, 6*scale), NSMakeRect(0, 0, 9, 6));
+            sprite(@"bendySpinnerDown", NSMakeRect(x, 5*scale, 9*scale, 6*scale), NSMakeRect(0, 0, 9, 6));
+        }
+    }
+    else if (self.kind == BitmapText)
+    {
+        std::wstring value = self.fixedText ? toWideString(self.fixedText) : param ? param->toString() : L"";
+        if (self.prefix) value = toWideString(self.prefix)+value;
+        bitmapText(value, self.bounds, self.bitmapAlignment);
+    }
+    else if (self.kind == Expand)
+        sprite(self.controller.root.expanded ? @"buttonContract" : @"buttonExpand", self.bounds, NSMakeRect(0, 0, 23, 7));
+}
+- (void)step:(float)amount
+{
+    Plugin* plugin = self.controller.plugin;
+    if (!plugin) return;
+    auto param = plugin->getParameterByIndex(static_cast<int>(self.tag));
+    if (!param) return;
+    self.floatValue = std::fmax(param->getMin(), std::fmin(param->getMax(), self.floatValue+amount*param->getInc()));
+    [self.controller change:self];
+}
+- (void)scrollWheel:(NSEvent*)event
+{
+    if (self.kind == Knob || self.kind == Spinner)
+        [self step:(event.scrollingDeltaY > 0 ? 1 : event.scrollingDeltaY < 0 ? -1 : 0) * ((event.modifierFlags & NSEventModifierFlagShift) ? 0.1f : 1.0f)];
+}
+- (void)keyDown:(NSEvent*)event
+{
+    if (event.keyCode == 126 || event.keyCode == 124) [self step:1];
+    else if (event.keyCode == 125 || event.keyCode == 123) [self step:-1];
+    else if (event.keyCode == 36 || event.keyCode == 49) [self accessibilityPerformPress];
+    else [super keyDown:event];
+}
+- (void)mouseDown:(NSEvent*)event
+{
+    if (event.modifierFlags & NSEventModifierFlagControl) { [self rightMouseDown:event]; return; }
+    [self.window makeFirstResponder:self];
+    if (self.kind == Expand) { [self.controller setExpanded:!self.controller.root.expanded]; return; }
+    if (self.kind == Presets) { [self.controller showPresets:self]; return; }
+    if (self.kind == Toggle) { self.floatValue = self.floatValue > 0 ? 0 : 1; [self.controller change:self]; return; }
+    if (self.kind == BitmapText || event.clickCount > 1) { [self.controller edit:self]; return; }
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    if (self.kind == Spinner)
+    {
+        if (self.arrows && point.x >= self.bounds.size.width-9*scale) [self step:point.y < 5*scale ? 1 : -1];
+        else [self.controller edit:self];
+        return;
+    }
+    // Linear knob drag, with Shift for fine adjustments, like the Windows knob.
+    self.dragStartY = event.locationInWindow.y;
+    self.dragStartValue = self.floatValue;
+    self.dragging = YES;
+}
+- (void)mouseDragged:(NSEvent*)event
+{
+    Plugin* plugin = self.controller.plugin;
+    if (!self.dragging || !plugin) return;
+    auto param = plugin->getParameterByIndex(static_cast<int>(self.tag));
+    if (!param) return;
+    CGFloat factor = (event.modifierFlags & NSEventModifierFlagShift) ? 0.1 : 1;
+    float value = self.dragStartValue+(event.locationInWindow.y-self.dragStartY)*(param->getMax()-param->getMin())/120*factor;
+    self.floatValue = std::fmax(param->getMin(), std::fmin(param->getMax(), value));
+    [self.controller change:self];
+}
+- (void)mouseUp:(NSEvent*)event { (void)event; self.dragging = NO; }
+- (void)rightMouseDown:(NSEvent*)event
+{
+    (void)event;
+    if (self.kind == Presets || self.kind == Expand) [self.controller showPresets:self];
+    else [self.controller showParameterMenu:self];
+}
+@end
+
+@implementation BendyBitmapEditor
+{
+    float letterLevels[5];
+}
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (void)animate
+{
+    if (!self.plugin) return;
+    for (int i = 0; i < 5; ++i)
+        letterLevels[i] = self.plugin->letters[i] ? 1 : std::fmax(0, letterLevels[i]-0.1f);
+    self.needsDisplay = YES;
+}
+- (void)drawRect:(NSRect)dirtyRect
+{
+    (void)dirtyRect;
+    if (!self.plugin) return;
+    sprite(self.expanded ? @"bendyBack" : @"bendyBackShort", self.bounds,
+        NSMakeRect(0, 0, 149, self.expanded ? 163 : 39));
+    NSArray* letters = @[@"bendyLetterB", @"bendyLetterE", @"bendyLetterN", @"bendyLetterD", @"bendyLetterY"];
+    for (int i = 0; i < 5; ++i)
+        sprite(letters[i], scaled(6, 5+i*6, 7, 6), NSMakeRect(0, static_cast<int>(letterLevels[i]*2)*6, 7, 6));
+    // Same vertical version stamp as Windows (0.994).
+    int version[] = {12, 1, 11, 10, 10, 5};
+    for (int i = 0; i < 6; ++i)
+        sprite(@"version_num", scaled(139, 8+i*4, 5, 3), NSMakeRect(0, version[i]*3, 5, 3));
+    if (self.plugin->isLegacy()) bitmapText(L"LEGACY", scaled(18, 32, 24, 8));
+    if (!self.expanded) return;
+    auto value = [&](const wchar_t* id) { return self.plugin->getParameter(id)->getNormalized(); };
+    float attack = value(L"asdrCCValue0"), sustain = value(L"asdrCCValue1"), decay = value(L"asdrCCValue2"), release = value(L"asdrCCValue3");
+    float widths[] = {attack, decay, 1, release}, heights[] = {1, sustain, sustain, 0};
+    float total = attack+decay+1+release, x = 0;
+    NSBezierPath* graph = [NSBezierPath bezierPath];
+    [graph moveToPoint:NSMakePoint(6*scale, 97*scale)];
+    for (int i = 0; i < 4; ++i)
+    {
+        x += widths[i]/total;
+        [graph lineToPoint:NSMakePoint((6+x*39)*scale, (88+(1-heights[i])*9)*scale)];
+    }
+    [NSColor.whiteColor setStroke];
+    graph.lineWidth = scale;
+    [graph stroke];
+}
+- (void)rightMouseDown:(NSEvent*)event { (void)event; [self.controller showPresets:self]; }
 @end
 
 @implementation BendyEditorController
@@ -105,110 +381,6 @@ NSTextField* label(NSString* value, NSRect rect)
     }
     return menu;
 }
-- (void)addParameter:(PlugParameter*)param toView:(NSView*)view y:(CGFloat)y
-{
-    NSString* title = text(param->name);
-    if (param->id == L"enableNoteTrigger") title = @"Trigger MIDI notes";
-    if (param->id == L"range") title = @"Pitch bend range (semitones)";
-    if (!param->id.empty() && iswdigit(param->id.back()))
-        title = [title stringByAppendingFormat:@" %d", static_cast<int>(param->id.back() - L'0') + 1];
-    NSTextField* name = label(title, NSMakeRect(16, y + 2, 250, 22));
-    name.toolTip = text(param->name);
-    [view addSubview:name];
-    NSControl* control;
-    if (auto selection = dynamic_cast<ParameterStringSelection*>(param))
-    {
-        NSPopUpButton* popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(272, y, 212, 26) pullsDown:NO];
-        for (int i = 0; i < static_cast<int>(selection->strings.size()); ++i)
-            [popup addItemWithTitle:text(selection->toReadable(i, false))];
-        control = popup;
-    }
-    else if (dynamic_cast<ParameterBool*>(param))
-    {
-        NSButton* button = [NSButton checkboxWithTitle:@"Enabled" target:self action:@selector(change:)];
-        button.frame = NSMakeRect(272, y, 212, 24);
-        button.allowsMixedState = YES;
-        control = button;
-    }
-    else if (dynamic_cast<ParameterString*>(param))
-    {
-        NSTextField* field = [[NSTextField alloc] initWithFrame:NSMakeRect(272, y, 212, 24)];
-        field.delegate = self;
-        control = field;
-    }
-    else
-    {
-        NSSlider* slider = [[NSSlider alloc] initWithFrame:NSMakeRect(272, y, 154, 24)];
-        slider.continuous = YES;
-        control = slider;
-        NSTextField* value = [[NSTextField alloc] initWithFrame:NSMakeRect(432, y, 52, 24)];
-        value.tag = param->index;
-        value.target = self;
-        value.delegate = self;
-        [view addSubview:value];
-        self.values[@(param->index)] = value;
-    }
-    control.tag = param->index;
-    control.target = self;
-    if (![control isKindOfClass:NSTextField.class]) control.action = @selector(change:);
-    control.toolTip = @"Use the ••• menu for automation, ranges and note controls.";
-    [view addSubview:control];
-    self.controls[@(param->index)] = control;
-    // A pull-down builds its menu on demand so host automation flags stay current.
-    NSButton* options = [NSButton buttonWithTitle:@"•••" target:self action:@selector(showOptions:)];
-    options.frame = NSMakeRect(492, y, 34, 24);
-    options.tag = param->index;
-    [view addSubview:options];
-}
-- (void)showOptions:(NSButton*)sender
-{
-    auto param = self.plugin->getParameterByIndex(static_cast<int>(sender.tag));
-    if (!param) return;
-    NSMenu* menu = [self menuForParameter:param];
-    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, sender.bounds.size.height) inView:sender];
-}
-- (void)selectTab:(NSButton*)sender
-{
-    [self.tabs selectTabViewItemAtIndex:sender.tag];
-    for (NSButton* button in self.tabButtons)
-        button.state = button == sender ? NSControlStateValueOn : NSControlStateValueOff;
-}
-- (void)change:(NSControl*)sender
-{
-    auto param = self.plugin->getParameterByIndex(static_cast<int>(sender.tag));
-    if (!param) return;
-    if (dynamic_cast<ParameterString*>(param))
-        param->setFromString(toWideString(sender.stringValue));
-    else
-    {
-        float value = sender.floatValue;
-        if ([sender isKindOfClass:NSPopUpButton.class])
-            value = static_cast<float>(((NSPopUpButton*)sender).indexOfSelectedItem);
-        else if ([sender isKindOfClass:NSButton.class])
-        {
-            NSControlStateValue state = ((NSButton*)sender).state;
-            value = state == NSControlStateValueMixed ? -1 : state == NSControlStateValueOn ? 1 : 0;
-        }
-        value = std::fmax(param->getMin(), std::fmin(param->getMax(), value));
-        if (dynamic_cast<ParameterInt*>(param)) value = std::round(value);
-        param->setFloat(value);
-        const int wireValue = *static_cast<int*>(param->get4ByteValue());
-        self.plugin->ProcessParam(param->index, wireValue, REC_UpdateValue | REC_UpdateControl);
-        self.plugin->PlugHost->OnParamChanged(self.plugin->HostTag, param->index, wireValue);
-    }
-    [self refresh];
-}
-- (void)controlTextDidEndEditing:(NSNotification*)notification
-{
-    [self change:notification.object];
-}
-- (void)choosePreset:(NSPopUpButton*)sender
-{
-    // The host may destroy/recreate this editor during the dispatcher call.
-    Plugin* plugin = self.plugin;
-    const NSInteger index = sender.indexOfSelectedItem - 1;
-    if (index >= 0) plugin->Dispatcher(FPD_SetPreset, index, 0);
-}
 - (void)menuAction:(NSMenuItem*)sender
 {
     NSArray<NSNumber*>* info = sender.representedObject;
@@ -245,123 +417,211 @@ NSTextField* label(NSString* value, NSRect rect)
     }
     [self refresh];
 }
+- (void)showParameterMenu:(BendyBitmapControl*)sender
+{
+    auto param = self.plugin->getParameterByIndex(static_cast<int>(sender.tag));
+    if (!param) return;
+    [[self menuForParameter:param] popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, sender.bounds.size.height) inView:sender];
+}
+- (void)change:(BendyBitmapControl*)sender
+{
+    auto param = self.plugin->getParameterByIndex(static_cast<int>(sender.tag));
+    if (!param) return;
+    float value = std::fmax(param->getMin(), std::fmin(param->getMax(), sender.floatValue));
+    if (dynamic_cast<ParameterInt*>(param)) value = std::round(value);
+    param->setFloat(value);
+    int wireValue;
+    std::memcpy(&wireValue, param->get4ByteValue(), sizeof(wireValue));
+    self.plugin->ProcessParam(param->index, wireValue, REC_UpdateValue | REC_UpdateControl);
+    self.plugin->PlugHost->OnParamChanged(self.plugin->HostTag, param->index, wireValue);
+    [self refresh];
+}
+- (void)selectValue:(NSMenuItem*)sender
+{
+    NSArray<NSNumber*>* info = sender.representedObject;
+    for (BendyBitmapControl* control in self.controls)
+        if (control.tag == info[0].integerValue) { control.floatValue = info[1].floatValue; [self change:control]; break; }
+}
+- (void)edit:(BendyBitmapControl*)sender
+{
+    auto param = self.plugin->getParameterByIndex(static_cast<int>(sender.tag));
+    if (!param) return;
+    if (auto selection = dynamic_cast<ParameterStringSelection*>(param))
+    {
+        NSMenu* menu = [[NSMenu alloc] initWithTitle:text(param->name)];
+        for (int i = 0; i < static_cast<int>(selection->strings.size()); ++i)
+        {
+            NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:text(selection->toReadable(i, false)) action:@selector(selectValue:) keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = @[@(param->index), @(i)];
+            item.state = i == static_cast<int>(param->getFloat()) ? NSControlStateValueOn : NSControlStateValueOff;
+            [menu addItem:item];
+        }
+        [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, sender.bounds.size.height) inView:sender];
+        return;
+    }
+    const int index = param->index;
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.messageText = text(param->name);
+    NSTextField* input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
+    input.stringValue = text(param->toString());
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.window.initialFirstResponder = input;
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    param = self.plugin->getParameterByIndex(index);
+    if (!param) return;
+    if (dynamic_cast<ParameterString*>(param)) { param->setFromString(toWideString(input.stringValue)); [self refresh]; }
+    else { sender.floatValue = input.floatValue; [self change:sender]; }
+}
+- (void)showPresets:(NSView*)sender
+{
+    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Factory presets"];
+    for (int i = 0; i < 128; ++i)
+    {
+        char name[256] = {};
+        self.plugin->GetName(FPN_Preset, i, 0, name);
+        if (!name[0]) break;
+        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:name] action:@selector(choosePreset:) keyEquivalent:@""];
+        item.target = self;
+        item.tag = i;
+        [menu addItem:item];
+    }
+    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, sender.bounds.size.height) inView:sender];
+}
+- (void)choosePreset:(NSMenuItem*)sender
+{
+    // The host may destroy this editor during the preset change.
+    Plugin* plugin = self.plugin;
+    plugin->Dispatcher(FPD_SetPreset, sender.tag, 0);
+}
+- (void)setExpanded:(BOOL)expanded
+{
+    BOOL changed = self.root.expanded != expanded;
+    self.root.expanded = expanded;
+    self.plugin->getParameter(L"expanded")->setFloat(expanded ? 1 : 0);
+    NSSize size = NSMakeSize(149*scale, (expanded ? 163 : 39)*scale);
+    [self.root setFrameSize:size];
+    for (BendyBitmapControl* control in self.controls)
+        control.hidden = NSMinY(control.frame) >= 39*scale && !expanded;
+    if (self.root.superview)
+    {
+        [self.root.superview setFrameSize:size];
+        if (changed) self.plugin->PlugHost->Dispatcher(self.plugin->HostTag, FHD_EditorResized, 0, 0);
+    }
+    self.root.needsDisplay = YES;
+}
 - (void)refresh
 {
-    for (NSNumber* index in self.controls)
+    for (BendyBitmapControl* control in self.controls)
     {
-        auto param = self.plugin->getParameterByIndex(index.intValue);
-        if (!param) continue;
-        NSControl* control = self.controls[index];
-        if ([control isKindOfClass:NSPopUpButton.class])
-            [(NSPopUpButton*)control selectItemAtIndex:static_cast<NSInteger>(param->getFloat())];
-        else if ([control isKindOfClass:NSButton.class])
-            ((NSButton*)control).state = param->getFloat() < 0 ? NSControlStateValueMixed :
-                param->getFloat() > 0 ? NSControlStateValueOn : NSControlStateValueOff;
-        else if ([control isKindOfClass:NSSlider.class])
+        auto param = self.plugin->getParameterByIndex(static_cast<int>(control.tag));
+        if (param)
         {
-            NSSlider* slider = (NSSlider*)control;
-            slider.minValue = param->getMin();
-            slider.maxValue = param->getMax();
-            slider.floatValue = param->getFloat();
+            control.floatValue = param->getFloat();
+            control.toolTip = [NSString stringWithFormat:@"%@: %@\nRight-click for automation and note controls.", text(param->getName()), text(param->toReadable())];
         }
-        else if (![(NSTextField*)control currentEditor])
-            control.stringValue = text(param->toString());
-        NSTextField* value = self.values[index];
-        if (value && !value.currentEditor) value.stringValue = text(param->toString());
+        control.needsDisplay = YES;
     }
+    [self setExpanded:self.plugin->getParameter(L"expanded")->getFloat() > 0.5f];
+}
+- (BendyBitmapControl*)add:(ControlKind)kind id:(const wchar_t*)identifier rect:(NSRect)rect sprite:(NSString*)image
+{
+    BendyBitmapControl* control = [[BendyBitmapControl alloc] initWithFrame:rect];
+    control.kind = kind;
+    control.controller = self;
+    control.spriteName = image;
+    control.bitmapAlignment = NSTextAlignmentCenter;
+    control.tag = -1;
+    control.target = self;
+    control.action = @selector(change:);
+    if (identifier)
+    {
+        auto param = self.plugin->getParameter(identifier);
+        control.tag = param->index;
+        [control setAccessibilityLabel:text(param->name)];
+    }
+    [self.root addSubview:control];
+    [self.controls addObject:control];
+    return control;
+}
+- (BendyBitmapControl*)spinner:(const wchar_t*)id rect:(NSRect)rect text:(BOOL)textMode arrows:(BOOL)arrows
+{
+    auto control = [self add:Spinner id:id rect:rect sprite:nil];
+    control.textMode = textMode;
+    control.arrows = arrows;
+    return control;
+}
+- (void)build
+{
+    self.controls = [NSMutableArray array];
+    self.root = [[BendyBitmapEditor alloc] initWithFrame:scaled(0, 0, 149, 39)];
+    self.root.plugin = self.plugin;
+    self.root.controller = self;
+    auto expand = [self add:Expand id:nullptr rect:scaled(117, 34, 23, 7) sprite:nil];
+    [expand setAccessibilityLabel:@"Show or hide advanced controls"];
+    expand.toolTip = @"Show or hide advanced controls";
+    auto logo = [self add:Presets id:nullptr rect:scaled(3, 3, 13, 33) sprite:nil];
+    logo.toolTip = @"Click for factory presets";
+    [logo setAccessibilityLabel:@"Factory presets"];
+    [self spinner:L"port" rect:scaled(50, 7, 25, 11) text:NO arrows:YES];
+    [self spinner:L"channel" rect:scaled(112, 7, 25, 11) text:NO arrows:YES];
+    [self spinner:L"range" rect:scaled(50, 21, 25, 11) text:NO arrows:YES];
+    const wchar_t* toggles[] = {L"enableNoteTrigger", L"enableNoteVelocity", L"enableNotePanning", L"enableNotePitch"};
+    NSArray* toggleImages = @[@"checkboxTriggerNotesSimple", @"checkboxVelocitySimple", @"checkboxPanningSimple", @"checkboxPitchSimple"];
+    for (int i = 0; i < 4; ++i) [self add:Toggle id:toggles[i] rect:scaled(81+i*15, 21, 11, 11) sprite:toggleImages[i]];
+    auto patch = [self spinner:L"midiPatch" rect:scaled(4, 42, 88, 11) text:YES arrows:YES];
+    patch.bitmapAlignment = NSTextAlignmentLeft;
+    [self spinner:L"midiBankCoarse" rect:scaled(93, 42, 25, 11) text:NO arrows:YES];
+    [self spinner:L"midiBankFine" rect:scaled(119, 42, 25, 11) text:NO arrows:YES];
+    [self add:Toggle id:L"vibratoEnabled" rect:scaled(39, 56, 5, 5) sprite:@"tinyCheckboxSimple"];
+    [self add:Knob id:L"vibratoSpeed" rect:scaled(70, 58, 11, 11) sprite:nil];
+    [self add:Knob id:L"vibratoDepth" rect:scaled(132, 58, 11, 11) sprite:nil];
+    [self add:Toggle id:L"asdrCCEnable" rect:scaled(2, 79, 5, 5) sprite:@"tinyCheckboxSimple"];
+    [self add:BitmapText id:L"asdrCCName" rect:scaled(8, 81, 38, 6) sprite:nil];
+    NSArray* envelopeNames = @[@"A", @"S", @"D", @"R"];
+    for (int i = 0; i < 4; ++i)
+    {
+        std::wstring cc = L"asdrCC"+std::to_wstring(i), value = L"asdrCCValue"+std::to_wstring(i);
+        auto caption = [self add:BitmapText id:cc.c_str() rect:scaled(51+i*12, 81, 5, 6) sprite:nil];
+        caption.fixedText = envelopeNames[i];
+        [self add:Knob id:value.c_str() rect:scaled(48+i*12, 87, 11, 11) sprite:nil];
+    }
+    [self add:Toggle id:L"harmonizerEnabled" rect:scaled(99, 79, 5, 5) sprite:@"tinyCheckboxSimple"];
+    [self spinner:L"harmonyKey" rect:scaled(101, 85, 11, 11) text:YES arrows:NO];
+    [self spinner:L"harmonyType" rect:scaled(113, 85, 20, 11) text:YES arrows:NO];
+    [self spinner:L"harmony" rect:scaled(134, 85, 11, 11) text:YES arrows:NO];
+    for (int i = 0; i < 8; ++i)
+    {
+        int x = 15+(i%4)*36, y = 110+(i/4)*30;
+        std::wstring suffix = std::to_wstring(i);
+        [self add:Toggle id:(L"midiKnobEnabled"+suffix).c_str() rect:scaled(x-13, y-10, 5, 5) sprite:@"tinyCheckboxSimple"];
+        [self add:Knob id:(L"midiKnobValue"+suffix).c_str() rect:scaled(x, y, 11, 11) sprite:nil];
+        auto cc = [self add:BitmapText id:(L"midiKnobCC"+suffix).c_str() rect:scaled(x-7, y-6, 25, 4) sprite:nil];
+        cc.prefix = @"CC-";
+        [self add:BitmapText id:(L"midiKnobName"+suffix).c_str() rect:scaled(x-12, y+13, 34, 4) sprite:nil];
+    }
+    [self refresh];
 }
 @end
 
 struct PluginGUI::Impl
 {
-    Plugin* plugin;
     BendyEditorController* controller;
     std::atomic<bool> dirty{true};
-    explicit Impl(Plugin* p) : plugin(p) {}
-    void build()
+    explicit Impl(Plugin* plugin)
     {
         controller = [[BendyEditorController alloc] init];
         controller.plugin = plugin;
-        controller.controls = [NSMutableDictionary dictionary];
-        controller.values = [NSMutableDictionary dictionary];
-        controller.root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 600, 540)];
-        auto root = controller.root;
-        root.wantsLayer = YES;
-        root.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
-        NSTextField* title = label(@"BENDY", NSMakeRect(20, 492, 180, 32));
-        title.font = [NSFont boldSystemFontOfSize:26];
-        [root addSubview:title];
-        NSPopUpButton* presets = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(270, 496, 310, 26) pullsDown:NO];
-        [presets addItemWithTitle:@"Load a factory preset…"];
-        // GetName is the same preset-name API used by FL Studio.
-        for (int i = 0; i < 128; ++i)
-        {
-            char name[256] = {};
-            plugin->GetName(FPN_Preset, i, 0, name);
-            if (!name[0]) break;
-            [presets addItemWithTitle:[NSString stringWithUTF8String:name] ?: @""];
-        }
-        presets.target = controller;
-        presets.action = @selector(choosePreset:);
-        [root addSubview:presets];
-        NSTabView* tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(10, 44, 580, 404)];
-        tabs.tabViewType = NSNoTabsNoBorder;
-        controller.tabs = tabs;
-        NSArray* names = @[@"Notes", @"MIDI CC", @"Envelope", @"Harmony & vibrato"];
-        NSMutableArray<NSButton*>* tabButtons = [NSMutableArray array];
-        for (int tab = 0; tab < 4; ++tab)
-        {
-            NSButton* button = [NSButton buttonWithTitle:names[tab] target:controller action:@selector(selectTab:)];
-            button.frame = NSMakeRect(20 + tab * 140, 456, 140, 28);
-            [button setButtonType:NSButtonTypePushOnPushOff];
-            button.tag = tab;
-            button.state = tab == 0 ? NSControlStateValueOn : NSControlStateValueOff;
-            [root addSubview:button];
-            [tabButtons addObject:button];
-            NSTabViewItem* item = [[NSTabViewItem alloc] initWithIdentifier:@(tab)];
-            item.label = names[tab];
-            NSScrollView* scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 574, 404)];
-            scroll.hasVerticalScroller = YES;
-            scroll.scrollerStyle = NSScrollerStyleOverlay;
-            NSView* document = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 574, 404)];
-            NSMutableArray<NSNumber*>* indexes = [NSMutableArray array];
-            for (int i = 0; i < plugin->Info->NumParams; ++i)
-            {
-                auto param = plugin->getParameterByIndex(i);
-                if (!param || !param->children.empty() || dynamic_cast<ParameterLink*>(param)) continue;
-                const auto& id = param->id;
-                if (id == L"currentPresetIndex" || id == L"expanded") continue;
-                int group = id.find(L"midiKnob") == 0 ? 1 : id.find(L"asdr") == 0 ? 2 :
-                    (id.find(L"harmon") == 0 || id == L"harmony" || id.find(L"vibrato") == 0) ? 3 : 0;
-                if (tab == group) [indexes addObject:@(i)];
-            }
-            const CGFloat height = std::fmax(404, indexes.count * 34 + 20);
-            document.frame = NSMakeRect(0, 0, 574, height);
-            for (NSUInteger row = 0; row < indexes.count; ++row)
-                [controller addParameter:plugin->getParameterByIndex(indexes[row].intValue)
-                    toView:document y:height - 40 - row * 34];
-            scroll.documentView = document;
-            [document scrollPoint:NSMakePoint(0, height)];
-            item.view = scroll;
-            [tabs addTabViewItem:item];
-        }
-        controller.tabButtons = tabButtons;
-        [root addSubview:tabs];
-        NSTextField* help = label(@"Match PORT with your instrument’s MIDI input. Use ••• for note controls and automation.",
-            NSMakeRect(20, 12, 560, 28));
-        help.font = [NSFont systemFontOfSize:11];
-        help.textColor = NSColor.secondaryLabelColor;
-        [root addSubview:help];
-        [controller refresh];
     }
 };
-
 PluginGUI::PluginGUI(void* plugin) : impl(new Impl(static_cast<Plugin*>(plugin))) {}
 PluginGUI::~PluginGUI() { close(); delete impl; }
 bool PluginGUI::open(void* parent)
 {
     if (!parent || !NSThread.isMainThread) return false;
-    impl->build();
+    [impl->controller build];
     reparent(parent);
     return true;
 }
@@ -378,16 +638,14 @@ void* PluginGUI::nativeView() const { return (__bridge void*)impl->controller.ro
 void PluginGUI::close()
 {
     [impl->controller.root removeFromSuperview];
+    impl->controller.root.plugin = nullptr;
     impl->controller.plugin = nullptr;
     impl->controller = nil;
 }
 void PluginGUI::idle()
 {
     if (impl->dirty.exchange(false)) [impl->controller refresh];
+    [impl->controller.root animate];
 }
 void PluginGUI::setParameter(int, float) { impl->dirty.store(true); }
-void PluginGUI::reconnect()
-{
-    impl->dirty.store(true);
-    [impl->controller refresh];
-}
+void PluginGUI::reconnect() { [impl->controller refresh]; }

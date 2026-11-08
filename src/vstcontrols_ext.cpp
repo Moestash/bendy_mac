@@ -4,6 +4,7 @@
 #include "Plugin.h"
 #include "../resource.h"
 #include <mutex>
+#include "BitmapFont.h"
 
 CBitmapNumber::CBitmapNumber(const CRect& firstLetterSize, CFrame* frame, CBitmap* numberImage, int digits, bool vertical)
 	: CViewContainer(CRect(firstLetterSize.getTopLeft(), vertical ? CPoint(firstLetterSize.getWidth(), (firstLetterSize.getHeight() + sScaleFactor) * digits) : CPoint((firstLetterSize.getWidth() + sScaleFactor) * digits, firstLetterSize.getHeight())), frame)
@@ -126,28 +127,7 @@ CBitmapNumber::~CBitmapNumber()
 	_digits = nullptr;
 }
 
-wchar_t _characters[317] = {
-	L' ', L'!', L'\"', L'#', L'$', L'%', L'&', L'\'', L'(', L')', L'*', L'+', L',', L'-', L'.', L'/',
-	L'0', L'1', L'2', L'3', L'4', L'5', L'6', L'7', L'8', L'9', L':', L';', L'>', L'=', L'<', L'?',
-	L'@', L'A', L'B', L'C', L'D', L'E', L'F', L'G', L'H', L'I', L'J', L'K', L'L', L'M', L'N', L'O',
-	L'P', L'Q', L'R', L'S', L'T', L'U', L'V', L'W', L'X', L'Y', L'Z', L'[', L'\\', L']', L'^', L'_',
-	L'`', L'a', L'b', L'c', L'd', L'e', L'f', L'g', L'h', L'i', L'j', L'k', L'l', L'm', L'n', L'o',
-	L'p', L'q', L'r', L's', L't', L'u', L'v', L'w', L'x', L'y', L'z', L'{', L'|', L'}', L'~', L'`',
-	L'À', L'Á', L'Â', L'Ã', L'Ä', L'Å', L'Æ', L'Ç', L'È', L'É', L'Ê', L'Ë', L'Ì', L'Í', L'Î', L'Ï',
-	L'Ð', L'Ñ', L'Ò', L'Ó', L'Ô', L'Õ', L'Ö', L'Ø', L'Ù', L'Ú', L'Û', L'Ü', L'Ý', L'Þ', L'ß', L'à',
-	L'á', L'â', L'ã', L'ä', L'å', L'æ', L'ç', L'è', L'é', L'ê', L'ë', L'ì', L'í', L'î', L'ï', L'ð',
-	L'ñ', L'ò', L'ó', L'ô', L'õ', L'ö', L'ø', L'ù', L'ú', L'û', L'ü', L'ý', L'þ', L'ÿ', L'Ā', L'ā',
-	L'Ă', L'ă', L'Ą', L'ą', L'Ć', L'ć', L'Ċ', L'ċ', L'Č', L'č', L'Ď', L'ď', L'Ē', L'ē', L'Ę', L'ę',
-	L'Ě', L'ě', L'Ğ', L'ğ', L'Ġ', L'ġ', L'Ģ', L'ģ', L'Ħ', L'ħ', L'Ī', L'ī', L'Į', L'į', L'İ', L'ı',
-	L'Ĳ', L'ĳ', L'Ķ', L'ķ', L'Ĺ', L'ĺ', L'Ļ', L'ļ', L'Ľ', L'ľ', L'Ł', L'ł', L'Ń', L'ń', L'Ņ', L'ņ',
-	L'Ň', L'ň', L'Ō', L'ō', L'Ő', L'ő', L'Œ', L'œ', L'Ŕ', L'ŕ', L'Ř', L'ř', L'Ś', L'ś', L'Ş', L'ş',
-	L'Š', L'š', L'Ţ', L'ţ', L'Ť', L'ť', L'Ū', L'ū', L'Ů', L'ů', L'Ű', L'ű', L'Ų', L'ų', L'Ÿ', L'Ź',
-	L'ź', L'Ż', L'ż', L'Ž', L'ž', L'ǅ', L'ǆ', L'ǲ', L'ǳ', L'А', L'Б', L'В', L'Г', L'Д', L'Е', L'Ж',
-	L'З', L'И', L'Й', L'К', L'Л', L'М', L'Н', L'О', L'П', L'Р', L'С', L'Т', L'У', L'Ф', L'Х', L'Ц',
-	L'Ч', L'Ш', L'Щ', L'Ъ', L'Ы', L'Ь', L'Э', L'Ю', L'Я', L'а', L'б', L'в', L'г', L'д', L'е', L'ж',
-	L'з', L'и', L'й', L'к', L'л', L'м', L'н', L'о', L'п', L'р', L'с', L'т', L'у', L'ф', L'х', L'ц',
-	L'ч', L'ш', L'щ', L'ъ', L'ы', L'ь', L'э', L'ю', L'я', L'¡', L'¿', L'Ё', L'ё',
-};
+
 
 std::mutex _charmapMutex;
 int* _characterMap = nullptr;
@@ -171,9 +151,9 @@ CBitmapText::CBitmapText(PluginGUI* plugin, const CRect& size, const CPoint& let
 		for (wchar_t i = 0; i < WCHAR_MAX / 4; i++)
 		{
 			_characterMap[i] = '[';
-			for (int iChar = 0; iChar < _countof(_characters); iChar++)
+			for (int iChar = 0; iChar < _countof(kBendyBitmapCharacters); iChar++)
 			{
-				if (_characters[iChar] == i)
+				if (kBendyBitmapCharacters[iChar] == i)
 				{
 					_characterMap[i] = iChar;
 					break;
@@ -252,7 +232,7 @@ void CBitmapText::draw(CDrawContext* pContext)
 		for (int i = 0; i < _text.length(); i++)
 		{
 			wchar_t c = _text[i];
-			if (c > 0 && c < _countof(_characters))
+			if (c > 0 && c < _countof(kBendyBitmapCharacters))
 			{
 				int charIndex = _characterMap[c];
 

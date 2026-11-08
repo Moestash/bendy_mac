@@ -4,6 +4,7 @@
 #include "StreamWrapper.h"
 #include "State.h"
 #include "mac/PluginGUI.h"
+#undef BOOL
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -20,6 +21,7 @@ static_assert(sizeof(TFruityPlugInfo) == 160, "FL plugin info uses 4-byte packin
 
 @interface NSObject (BendyEditorTesting)
 - (NSMenu*)menuForParameter:(PlugParameter*)parameter;
+- (void)setExpanded:(BOOL)expanded;
 @end
 
 class MemoryStream : public IStream
@@ -178,6 +180,46 @@ void testStateAndMIDI()
     CHECK(floating.value == 1.5f);
 }
 
+void testFactoryPresets()
+{
+    MockHost host;
+    FruityPlugInfo info{42, &host};
+    Plugin plugin(&info);
+    char name[256] = {};
+    plugin.GetName(FPN_Preset, 4, 0, name);
+    CHECK(std::strcmp(name, "Sound Canvas Controller") == 0);
+    plugin.GetName(FPN_Preset, 5, 0, name);
+    CHECK(std::strcmp(name, "Serum Controller") == 0);
+    set(plugin, L"port", 9);
+    plugin.Dispatcher(FPD_SetPreset, 5, 0);
+    CHECK(plugin.getParameter(L"port")->getFloat() == 9);
+    CHECK(plugin.getParameter(L"range")->getFloat() == 12);
+    const int serumCCs[] = {20, 21, 22, 23, 74, 71, 24, 25};
+    for (int i = 0; i < 8; ++i)
+    {
+        CHECK(plugin.getParameter(L"midiKnobCC"+std::to_wstring(i))->getFloat() == serumCCs[i]);
+        CHECK(plugin.getParameter(L"midiKnobEnabled"+std::to_wstring(i))->getFloat() == -1);
+    }
+    CHECK(plugin.getParameter(L"midiKnobName6")->toString() == L"WT Pos");
+    host.messages.clear();
+    set(plugin, L"midiKnobValue0", 64);
+    CHECK(std::any_of(host.messages.begin(), host.messages.end(), [](const TMIDIOutMsg& message) {
+        return message.Status == 0xb0 && message.Data1 == 20 && message.Data2 == 64 && message.Port == 9;
+    }));
+    plugin.GetName(FPN_Preset, 6, 0, name);
+    CHECK(std::strcmp(name, "Massive Controller") == 0);
+    plugin.Dispatcher(FPD_SetPreset, 6, 0);
+    for (int i = 0; i < 8; ++i)
+    {
+        CHECK(plugin.getParameter(L"midiKnobCC"+std::to_wstring(i))->getFloat() == 20+i);
+        CHECK(plugin.getParameter(L"midiKnobName"+std::to_wstring(i))->toString() == L"Macro "+std::to_wstring(i+1));
+    }
+    for (int i = 0; i < 4; ++i)
+        CHECK(plugin.getParameter(L"asdrCC"+std::to_wstring(i))->getFloat() == 28+i);
+    plugin.Dispatcher(FPD_SetPreset, -1, 0);
+    CHECK(plugin.getParameter(L"midiKnobCC7")->getFloat() == 27);
+}
+
 // Optional offscreen AppKit integration test; requires a macOS login session.
 void testEditor(const char* snapshot)
 {
@@ -191,12 +233,53 @@ void testEditor(const char* snapshot)
     window.releasedWhenClosed = NO;
     window.contentView = parent;
     plugin.Dispatcher(FPD_ShowEditor, 0, reinterpret_cast<intptr_t>((__bridge void*)parent));
-    CHECK(plugin.EditorHandle != 0);
-    CHECK(parent.subviews.count == 1);
+    CHECK(plugin.EditorHandle != 0 && parent.subviews.count == 1);
     NSView* root = parent.subviews.firstObject;
-    NSTabView* tabs = nil;
-    for (NSView* view in root.subviews) if ([view isKindOfClass:NSTabView.class]) tabs = (NSTabView*)view;
-    CHECK(tabs && tabs.numberOfTabViewItems == 4);
+    CHECK(root.frame.size.width == 447 && root.frame.size.height == 117);
+    const int portIndex = plugin.getParameter(L"port")->index;
+    auto findControl = [&](const wchar_t* id) -> NSControl* {
+        int index = plugin.getParameter(id)->index;
+        for (NSView* view in root.subviews)
+            if ([view isKindOfClass:NSControl.class] && ((NSControl*)view).tag == index) return (NSControl*)view;
+        return nil;
+    };
+    NSControl* port = findControl(L"port");
+    NSControl* knob = findControl(L"midiKnobValue0");
+    CHECK(port && knob && knob.hidden);
+    // Exercise actual spinner hit testing, including the flipped coordinate system.
+    NSPoint point = [port convertPoint:NSMakePoint(port.bounds.size.width-2, 2) toView:nil];
+    NSEvent* click = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:point modifierFlags:0
+        timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    [port mouseDown:click];
+    CHECK(plugin.getParameter(L"port")->getFloat() == 1);
+    CHECK(host.notifiedParameter == portIndex);
+    NSControl* pitchToggle = findControl(L"enableNotePitch");
+    CHECK([pitchToggle accessibilityPerformPress]);
+    CHECK(plugin.getParameter(L"enableNotePitch")->getFloat() == 0);
+    CHECK([pitchToggle accessibilityPerformPress]);
+    CHECK(plugin.getParameter(L"enableNotePitch")->getFloat() == 1);
+    port.floatValue = 11;
+    [port sendAction:port.action to:port.target];
+    CHECK(plugin.getParameter(L"port")->getFloat() == 11);
+    [port.target setExpanded:YES];
+    CHECK(root.frame.size.height == 489 && !knob.hidden);
+    CHECK(plugin.getParameter(L"expanded")->getFloat() == 1);
+    plugin.Dispatcher(FPD_SetPreset, 5, 0);
+    CHECK(plugin.getParameter(L"midiKnobName0")->toString() == L"Macro 1");
+    // Exercise the AppKit drag responders; the knob must send the learned CC
+    // through the same parameter path as automation.
+    NSPoint start = [knob convertPoint:NSMakePoint(10, 10) toView:nil];
+    NSPoint end = NSMakePoint(start.x, start.y+60);
+    auto mouseEvent = [&](NSEventType type, NSPoint location) {
+        return [NSEvent mouseEventWithType:type location:location modifierFlags:0 timestamp:0
+            windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    };
+    [knob mouseDown:mouseEvent(NSEventTypeLeftMouseDown, start)];
+    [knob mouseDragged:mouseEvent(NSEventTypeLeftMouseDragged, end)];
+    [knob mouseUp:mouseEvent(NSEventTypeLeftMouseUp, end)];
+    CHECK(plugin.getParameter(L"midiKnobValue0")->getFloat() > 0);
+    CHECK(plugin.getParameter(L"midiKnobValue0")->getFloat() < 127);
+    CHECK(plugin.getParameter(L"midiKnobEnabled0")->getFloat() == 1);
     [window display];
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     if (snapshot)
@@ -207,16 +290,6 @@ void testEditor(const char* snapshot)
         NSData* png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         CHECK([png writeToFile:[NSString stringWithUTF8String:snapshot] atomically:YES]);
     }
-    NSScrollView* scroll = (NSScrollView*)[tabs tabViewItemAtIndex:0].view;
-    const int portIndex = plugin.getParameter(L"port")->index;
-    NSSlider* port = nil;
-    for (NSView* view in scroll.documentView.subviews)
-        if ([view isKindOfClass:NSSlider.class] && ((NSControl*)view).tag == portIndex) port = (NSSlider*)view;
-    CHECK(port);
-    port.intValue = 11;
-    [port sendAction:port.action to:port.target];
-    CHECK(plugin.getParameter(L"port")->getFloat() == 11);
-    CHECK(host.notifiedParameter == portIndex);
     NSMenu* menu = [port.target menuForParameter:plugin.getParameter(L"port")];
     NSMenuItem* assign = nil;
     for (NSMenuItem* item in menu.itemArray)
@@ -233,6 +306,15 @@ void testEditor(const char* snapshot)
     NSView* other = [[NSView alloc] initWithFrame:parent.frame];
     plugin.Dispatcher(FPD_ShowEditor, 0, reinterpret_cast<intptr_t>((__bridge void*)other));
     CHECK(parent.subviews.count == 0 && other.subviews.count == 1);
+    [port.target setExpanded:NO];
+    CHECK(root.frame.size.height == 117 && knob.hidden);
+    if (snapshot)
+    {
+        NSString* path = [[[NSString stringWithUTF8String:snapshot] stringByDeletingPathExtension] stringByAppendingString:@"-compact.png"];
+        NSBitmapImageRep* bitmap = [root bitmapImageRepForCachingDisplayInRect:root.bounds];
+        [root cacheDisplayInRect:root.bounds toBitmapImageRep:bitmap];
+        CHECK([[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
+    }
     plugin.Dispatcher(FPD_ShowEditor, 0, 0);
     CHECK(plugin.EditorHandle == 0 && other.subviews.count == 0);
     [window close];
@@ -244,6 +326,7 @@ int main(int argc, char** argv)
         try {
             testWireFormat();
             testStateAndMIDI();
+            testFactoryPresets();
             if (argc > 1 && std::strcmp(argv[1], "--gui") == 0) testEditor(argc > 2 ? argv[2] : nullptr);
             std::puts("BENDY macOS tests passed");
             return 0;

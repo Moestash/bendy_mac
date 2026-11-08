@@ -11,6 +11,7 @@ enable_language(OBJCXX)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_STANDARD 14)
+include(cmake/EmbedArtwork.cmake)
 
 set(BENDY_CORE_SOURCES
     src/Plugin.cpp src/Parameter.cpp src/Preset.cpp src/Scale.cpp
@@ -22,12 +23,13 @@ target_compile_options(bendy_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_compile_options(bendy_core PRIVATE -Wno-inconsistent-missing-override)
 
 add_library(BENDY SHARED $<TARGET_OBJECTS:bendy_core> src/mac/PluginGUI.mm)
-target_include_directories(BENDY PRIVATE src src/fl)
+target_include_directories(BENDY PRIVATE src src/fl "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(BENDY PRIVATE -fobjc-arc -Wall -Wextra -Wno-unused-parameter -Wno-inconsistent-missing-override)
 target_link_libraries(BENDY PRIVATE "-framework Cocoa")
 set_target_properties(BENDY PROPERTIES PREFIX "" OUTPUT_NAME "BENDY_x64"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/BENDY")
 configure_file(src/mac/Plugin.nfo "${CMAKE_BINARY_DIR}/BENDY/Plugin.nfo" COPYONLY)
+configure_file(docs/Synth-presets.md "${CMAKE_BINARY_DIR}/BENDY/Synth-presets.md" COPYONLY)
 add_custom_command(TARGET BENDY POST_BUILD
     COMMAND /usr/bin/codesign --force --sign - "$<TARGET_FILE:BENDY>"
     COMMENT "Ad-hoc signing BENDY for local use" VERBATIM)
@@ -35,7 +37,7 @@ add_custom_command(TARGET BENDY POST_BUILD
 include(CTest)
 if(BUILD_TESTING)
     add_executable(bendy_tests tests/mac_tests.mm $<TARGET_OBJECTS:bendy_core> src/mac/PluginGUI.mm)
-    target_include_directories(bendy_tests PRIVATE src src/fl)
+    target_include_directories(bendy_tests PRIVATE src src/fl "${CMAKE_BINARY_DIR}/generated")
     target_compile_options(bendy_tests PRIVATE -fobjc-arc -Wno-inconsistent-missing-override)
     target_link_libraries(bendy_tests PRIVATE "-framework Cocoa")
     add_test(NAME bendy_core COMMAND bendy_tests)
