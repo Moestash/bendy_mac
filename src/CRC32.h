@@ -1,7 +1,7 @@
 /* Crc - 32 BIT ANSI X3.66 CRC checksum files */
 
 #include <stdio.h>
-#include <windows.h>
+#include <stdint.h>
 
 #ifdef __TURBOC__
 #pragma warn -cln
@@ -21,7 +21,7 @@
 
 /* Need an unsigned type capable of holding 32 bits; */
 
-typedef DWORD UNS_32_BITS;
+typedef uint32_t UNS_32_BITS;
 
 /* Copyright (C) 1986 Gary S. Brown.  You may use this program, or
    code or tables extracted from it, as desired without restriction.*/
@@ -70,7 +70,7 @@ typedef DWORD UNS_32_BITS;
    /*     using byte-swap instructions.                                   */
 
 #define UPDC32(octet,crc) (crc_32_tab[((crc)\
-     ^ ((BYTE)octet)) & 0xff] ^ ((crc) >> 8))
+     ^ ((uint8_t)octet)) & 0xff] ^ ((crc) >> 8))
 
 static UNS_32_BITS crc_32_tab[] = { /* CRC polynomial 0xedb88320 */
 0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
@@ -118,16 +118,16 @@ static UNS_32_BITS crc_32_tab[] = { /* CRC polynomial 0xedb88320 */
 0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d
 };
 
-DWORD updateCRC32(unsigned char ch, DWORD crc)
+uint32_t updateCRC32(unsigned char ch, uint32_t crc)
 {
     return UPDC32(ch, crc);
 }
 
-bool crc32file(char* name, DWORD* crc, long* charcnt)
+bool crc32file(char* name, uint32_t* crc, long* charcnt)
 {
-    register FILE* fin;
-    register DWORD oldcrc32;
-    register int c;
+    FILE* fin;
+    uint32_t oldcrc32;
+    int c;
 
     oldcrc32 = 0xFFFFFFFF; *charcnt = 0;
 #ifdef MSDOS
@@ -157,9 +157,9 @@ bool crc32file(char* name, DWORD* crc, long* charcnt)
     return true;
 }
 
-DWORD crc32buf(char* buf, size_t len)
+uint32_t crc32buf(char* buf, size_t len)
 {
-    register DWORD oldcrc32;
+    uint32_t oldcrc32;
 
     oldcrc32 = 0xFFFFFFFF;
 
@@ -176,9 +176,9 @@ DWORD crc32buf(char* buf, size_t len)
 
 main(int argc, char* argv[])
 {
-    DWORD crc;
+    uint32_t crc;
     long charcnt;
-    register errors = 0;
+    int errors = 0;
 
     while (--argc > 0)
     {

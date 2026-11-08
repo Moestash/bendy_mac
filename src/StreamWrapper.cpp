@@ -2,7 +2,44 @@
 #include "fp_cplug.h"
 #include "fp_def.h"
 #include <vector>
-#include <cassert>
+#include <algorithm>
+#include <climits>
+#include <cfloat>
+#include <codecvt>
+#include <cstring>
+#include <limits>
+#include <locale>
+#include <stdexcept>
+
+namespace {
+#ifdef _WIN32
+using WideCodecvt = std::codecvt_utf8_utf16<wchar_t>;
+#else
+using WideCodecvt = std::codecvt_utf8<wchar_t>;
+#endif
+// Windows saves wchar_t as UTF-16. macOS wchar_t is UTF-32, so the wire
+// representation must be explicit to keep projects and presets portable.
+std::u16string toUTF16(const std::wstring& value)
+{
+    std::wstring_convert<WideCodecvt> wide;
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> utf16;
+    return utf16.from_bytes(wide.to_bytes(value));
+}
+std::wstring fromUTF16(const std::u16string& value)
+{
+    std::wstring_convert<WideCodecvt> wide;
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> utf16;
+    return wide.from_bytes(utf16.to_bytes(value));
+}
+int stringLength(Stream& stream)
+{
+    int length = stream.readInt();
+    if (length < 0 || length > 16 * 1024 * 1024)
+        throw std::runtime_error("Invalid BENDY string length");
+    return length;
+}
+}
+
 
 StreamWrapper::StreamWrapper(IStream* data)
 {
@@ -36,8 +73,9 @@ void StreamWrapper::setPosition(int bytes)
 char StreamWrapper::readChar()
 {
 	char ret = 0;
-	if (_stream->Read(&ret, sizeof(char), 0) != S_OK)
-		return CHAR_MAX;
+	ULONG read = 0;
+	if (_stream->Read(&ret, sizeof(char), &read) != S_OK || read != sizeof(char))
+		throw std::runtime_error("Truncated BENDY state");
 
 	return ret;
 }
@@ -50,8 +88,9 @@ void StreamWrapper::writeChar(char value)
 bool StreamWrapper::readBool()
 {
 	bool ret = 0;
-	if (_stream->Read(&ret, 1, 0) != S_OK)
-		return false;
+	ULONG read = 0;
+	if (_stream->Read(&ret, 1, &read) != S_OK || read != 1)
+		throw std::runtime_error("Truncated BENDY state");
 
 	return ret;
 }
@@ -63,8 +102,9 @@ void StreamWrapper::writeBool(bool value)
 unsigned short StreamWrapper::readUShort()
 {
 	unsigned short ret = 0;
-	if (_stream->Read(&ret, sizeof(unsigned short), 0) != S_OK)
-		return USHRT_MAX;
+	ULONG read = 0;
+	if (_stream->Read(&ret, sizeof(unsigned short), &read) != S_OK || read != sizeof(unsigned short))
+		throw std::runtime_error("Truncated BENDY state");
 
 	return ret;
 }
@@ -78,8 +118,9 @@ void StreamWrapper::writeUShort(unsigned short value)
 int StreamWrapper::readInt()
 {
 	int ret = 0;
-	if (_stream->Read(&ret, sizeof(int), 0) != S_OK)
-		return INT32_MAX;
+	ULONG read = 0;
+	if (_stream->Read(&ret, sizeof(int), &read) != S_OK || read != sizeof(int))
+		throw std::runtime_error("Truncated BENDY state");
 
 	return ret;
 }
@@ -92,8 +133,9 @@ void StreamWrapper::writeInt(int value)
 unsigned int StreamWrapper::readUInt()
 {
 	unsigned int ret = 0;
-	if (_stream->Read(&ret, sizeof(unsigned int), 0) != S_OK)
-		return UINT32_MAX;
+	ULONG read = 0;
+	if (_stream->Read(&ret, sizeof(unsigned int), &read) != S_OK || read != sizeof(unsigned int))
+		throw std::runtime_error("Truncated BENDY state");
 
 	return ret;
 }
@@ -106,8 +148,9 @@ void StreamWrapper::writeUInt(unsigned int value)
 float StreamWrapper::readFloat()
 {
 	float ret = 0;
-	if (_stream->Read(&ret, sizeof(float), 0) != S_OK)
-		return FLT_MAX;
+	ULONG read = 0;
+	if (_stream->Read(&ret, sizeof(float), &read) != S_OK || read != sizeof(float))
+		throw std::runtime_error("Truncated BENDY state");
 
 	return ret;
 }
@@ -118,20 +161,23 @@ void StreamWrapper::writeFloat(float value)
 
 std::wstring StreamWrapper::readString()
 {
-	int length = readInt();
-	wchar_t* buffer = new wchar_t[length + 1];
-	_stream->Read(buffer, sizeof(wchar_t) * length, 0);
-	buffer[length] = L'\0';
-
-	std::wstring ret = buffer;
-	delete[] buffer;
-	return ret;
+    const int length = stringLength(*this);
+    std::u16string value(length, u'\0');
+    ULONG read = 0;
+    const ULONG bytes = static_cast<ULONG>(length * sizeof(char16_t));
+    if (bytes && (_stream->Read(&value[0], bytes, &read) != S_OK || read != bytes))
+        throw std::runtime_error("Truncated BENDY string");
+    return fromUTF16(value);
 }
 
-void StreamWrapper::writeString(std::wstring s)
+void StreamWrapper::writeString(std::wstring value)
 {
-	writeInt(s.length());
-	_stream->Write(s.c_str(), sizeof(wchar_t) * s.length(), 0);
+    const auto utf16 = toUTF16(value);
+    writeInt(static_cast<int>(utf16.size()));
+    const ULONG bytes = static_cast<ULONG>(utf16.size() * sizeof(char16_t));
+    ULONG written = 0;
+    if (bytes && (_stream->Write(utf16.data(), bytes, &written) != S_OK || written != bytes))
+        throw std::runtime_error("Could not write BENDY string");
 }
 
 DataStream::DataStream(const void* data, int size)
@@ -162,7 +208,7 @@ DataStream::~DataStream()
 void DataStream::advance(int bytes)
 {
 	_position += bytes;
-	assert(_position >= 0 && _position <= _size);
+	if (_position < 0 || _position > _size) throw std::runtime_error("Invalid BENDY stream position");
 }
 
 int DataStream::getPosition()
@@ -181,7 +227,7 @@ void DataStream::setPosition(int bytes)
 
 char DataStream::readChar()
 {
-	assert(_position + sizeof(char) <= _size);
+	if (sizeof(char) > static_cast<size_t>(_size - _position)) throw std::runtime_error("Truncated BENDY state");
 	char c = _data[_position];
 	_position++;
 	return c;
@@ -196,113 +242,118 @@ void DataStream::writeChar(char value)
 
 bool DataStream::readBool()
 {
-	assert(_position + sizeof(bool) <= _size);
-	bool* c = (bool*)(&_data[_position]);
-	_position += sizeof(bool);
-	return *c;
+	if (sizeof(bool) > static_cast<size_t>(_size - _position)) throw std::runtime_error("Truncated BENDY state");
+	bool c;
+	std::memcpy(&c, _data + _position, sizeof(c));
+	_position += sizeof(c);
+	return c;
 }
 void DataStream::writeBool(bool value)
 {
 	ensure(sizeof(value));
-	*((bool*)(_data + _position)) = value;
+	std::memcpy(_data + _position, &value, sizeof(value));
 	_position += sizeof(value);
 }
 
 unsigned short DataStream::readUShort()
 {
-	assert(_position + sizeof(unsigned short) <= _size);
-	unsigned short* c = (unsigned short*)(&_data[_position]);
-	_position += sizeof(unsigned short);
-	return *c;
+	if (sizeof(unsigned short) > static_cast<size_t>(_size - _position)) throw std::runtime_error("Truncated BENDY state");
+	unsigned short c;
+	std::memcpy(&c, _data + _position, sizeof(c));
+	_position += sizeof(c);
+	return c;
 }
 
 void DataStream::writeUShort(unsigned short value)
 {
 	ensure(sizeof(value));
-	*((unsigned short*)(_data + _position)) = value;
+	std::memcpy(_data + _position, &value, sizeof(value));
 	_position += sizeof(value);
 }
 
 
 int DataStream::readInt()
 {
-	assert(_position + sizeof(int) <= _size);
-	int* c = (int*)(&_data[_position]);
-	_position += sizeof(int);
-	return *c;
+	if (sizeof(int) > static_cast<size_t>(_size - _position)) throw std::runtime_error("Truncated BENDY state");
+	int c;
+	std::memcpy(&c, _data + _position, sizeof(c));
+	_position += sizeof(c);
+	return c;
 }
 
 void DataStream::writeInt(int value)
 {
 	ensure(sizeof(value));
-	*((int*)(_data + _position)) = value;
+	std::memcpy(_data + _position, &value, sizeof(value));
 	_position += sizeof(value);
 }
 
 unsigned int DataStream::readUInt()
 {
-	assert(_position + sizeof(unsigned int) <= _size);
-	unsigned int* c = (unsigned int*)(&_data[_position]);
-	_position += sizeof(unsigned int);
-	return *c;
+	if (sizeof(unsigned int) > static_cast<size_t>(_size - _position)) throw std::runtime_error("Truncated BENDY state");
+	unsigned int c;
+	std::memcpy(&c, _data + _position, sizeof(c));
+	_position += sizeof(c);
+	return c;
 }
 
 void DataStream::writeUInt(unsigned int value)
 {
 	ensure(sizeof(value));
-	*((unsigned int*)(_data + _position)) = value;
+	std::memcpy(_data + _position, &value, sizeof(value));
 	_position += sizeof(value);
 }
 
 float DataStream::readFloat()
 {
-	assert(_position + sizeof(float) <= _size);
-	float* c = (float*)(&_data[_position]);
-	_position += sizeof(float);
-	return *c;
+	if (sizeof(float) > static_cast<size_t>(_size - _position)) throw std::runtime_error("Truncated BENDY state");
+	float c;
+	std::memcpy(&c, _data + _position, sizeof(c));
+	_position += sizeof(c);
+	return c;
 }
 
 void DataStream::writeFloat(float value)
 {
 	ensure(sizeof(value));
-	*((float*)(_data + _position)) = value;
+	std::memcpy(_data + _position, &value, sizeof(value));
 	_position += sizeof(value);
 }
 
 std::wstring DataStream::readString()
 {
-	assert(_position + sizeof(int) < _size);
-	int length = readInt();
-	assert(_position + sizeof(wchar_t) * length < _size);
-
-	wchar_t* buffer = new wchar_t[length + 1];
-	memcpy(buffer, _data + _position, sizeof(wchar_t) * length);
-	buffer[length] = L'\0';
-	_position += sizeof(wchar_t) * length;
-
-	std::wstring ret = buffer;
-	delete[] buffer;
-	return ret;
+    const int length = stringLength(*this);
+    const int bytes = length * sizeof(char16_t);
+    if (bytes > _size - _position)
+        throw std::runtime_error("Truncated BENDY string");
+    std::u16string value(length, u'\0');
+    if (bytes) std::memcpy(&value[0], _data + _position, bytes);
+    _position += bytes;
+    return fromUTF16(value);
 }
 
-void DataStream::writeString(std::wstring s)
+void DataStream::writeString(std::wstring value)
 {
-	writeInt(s.length());
-	ensure(sizeof(wchar_t) * s.length());
-	memcpy(_data + _position, s.c_str(), sizeof(wchar_t) * s.length());
-	_position += sizeof(wchar_t) * s.length();
+    const auto utf16 = toUTF16(value);
+    writeInt(static_cast<int>(utf16.size()));
+    const int bytes = static_cast<int>(utf16.size() * sizeof(char16_t));
+    ensure(bytes);
+    std::memcpy(_data + _position, utf16.data(), bytes);
+    _position += bytes;
 }
 
 void DataStream::ensure(int additionalSize)
 {
-	if (_position + additionalSize >= _size)
-	{
-		int newSize = _size * 2;
-		char* resize = new char[newSize];
-		memset(resize, 0, newSize);
-		memcpy(resize, _data, _size);
-		delete[] _data;
-		_data = resize;
-		_size = newSize;
-	}
+    if (additionalSize < 0 || _position > INT_MAX - additionalSize)
+        throw std::runtime_error("BENDY state is too large");
+    const int needed = _position + additionalSize;
+    if (needed > _size)
+    {
+        const int newSize = (std::max)(needed, _size <= INT_MAX / 2 ? _size * 2 : INT_MAX);
+        char* resize = new char[newSize]();
+        std::memcpy(resize, _data, _size);
+        delete[] _data;
+        _data = resize;
+        _size = newSize;
+    }
 }

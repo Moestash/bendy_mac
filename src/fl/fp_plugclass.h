@@ -14,26 +14,31 @@ plugin & host classes
 
 #ifdef __APPLE__
 #include <stdint.h>
+#include <cstring>
 #else
 #include <objidl.h>
 #endif
 #include "fp_def.h"
 
 #ifdef __APPLE__
-#define _stdcall __stdcall
+#define _stdcall
 #define BOOL int
 #define HINSTANCE intptr_t
 #define HMENU intptr_t
 #define DWORD unsigned int
 #define HWND intptr_t
 #define HANDLE intptr_t
-#define NULL 0
 #define MAX_PATH 256
 #define RTL_CRITICAL_SECTION intptr_t
-typedef unsigned long ULONG;
+typedef uint32_t ULONG;
 typedef long HRESULT;
-typedef unsigned long long ULARGE_INTEGER;
-typedef long long LARGE_INTEGER;
+union ULARGE_INTEGER { uint64_t QuadPart; };
+union LARGE_INTEGER { int64_t QuadPart; };
+constexpr DWORD STREAM_SEEK_SET = 0;
+constexpr DWORD STREAM_SEEK_CUR = 1;
+constexpr DWORD STREAM_SEEK_END = 2;
+constexpr HRESULT S_OK = 0;
+typedef unsigned char byte;
 #endif
 
 #pragma pack(push)
@@ -41,7 +46,7 @@ typedef long long LARGE_INTEGER;
 
 
 #ifdef __APPLE__
-#define STDMETHODCALLTYPE __stdcall
+#define STDMETHODCALLTYPE
 class IStream
 {
 public:

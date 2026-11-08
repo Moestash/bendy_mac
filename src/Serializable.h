@@ -6,6 +6,7 @@ class Stream;
 struct Serializable 
 {
 	Serializable(std::wstring readableName, std::wstring id);
+	virtual ~Serializable() = default;
 	virtual void serialize(Stream* s);
 	virtual void deserialize(Stream* s);
 	virtual void legacy_deserialize(Stream* s);

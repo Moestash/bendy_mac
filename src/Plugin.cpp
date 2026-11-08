@@ -1,9 +1,16 @@
 #include "Plugin.h"
+#ifdef __APPLE__
+#include "mac/PluginGUI.h"
+#else
 #include "PluginGUI.h"
+#endif
 #include "State.h"
 #include "StreamWrapper.h"
 #include <codecvt>
 #include <locale>
+#include <memory>
+#include <stdexcept>
+#include <cstdint>
 extern "C" TFruityPlug * _stdcall CreatePlugInstance(TFruityPlugHost * Host, TPluginTag Tag)
 {
 	FruityPlugInfo info;
@@ -17,15 +24,20 @@ TFruityPlugInfo PlugInfo =
 	CurrentSDKVersion,
 	new char[] { "BENDY" },
 	new char[] { "BENDY" },
-	FPF_Type_Visual | FPF_WantNewTick | FPF_MIDIOut // the amount of parameters
+	FPF_Type_Visual | FPF_WantNewTick | FPF_MIDIOut
+#ifdef __APPLE__
+    | FPF_MacNeedsNSView
+#endif
 };
 
 void* hInstance; // used by VSTGUI
+#ifndef __APPLE__
 extern "C" BOOL WINAPI DllMain(HINSTANCE hInst, DWORD dwReason, LPVOID lpvReserved)
 {
 	hInstance = hInst;
 	return TRUE;
 }
+#endif
 
 Plugin::Plugin(void* data)
 	: TCPPFruityPlug(static_cast<FruityPlugInfo*>(data)->Tag, static_cast<FruityPlugInfo*>(data)->Host, 0)
@@ -204,53 +216,48 @@ Plugin::~Plugin()
 
 void _stdcall Plugin::SaveRestoreState(IStream* Stream, BOOL Save)
 {
-	unsigned long magicNumber = 13118359537711872022L;
-	unsigned long legacyMagicNumber = 14928659832781827043L;
-	StreamWrapper* s = new StreamWrapper(Stream);
-	if (Save)
-	{
-		unsigned long written = 0;
-		Stream->Write(&magicNumber, sizeof(unsigned long), &written);
-		if(_state != nullptr)
-			_state->serialize(s);
-	}
-	else
-	{
-		unsigned long written = 0;
-		unsigned long magicNumberRead = 0;
-		Stream->Read(&magicNumberRead, sizeof(unsigned long), &written);
-
-		State* oldState = _state;
-		if (magicNumberRead == legacyMagicNumber)
-		{
-			//deserialize using old synthman logic
-			int streamSize = 0;
-			Stream->Read(&streamSize, sizeof(int), &written);
-			_state = new State();
-			_state->legacy_deserialize(s);
-		}
-		else if (magicNumberRead == magicNumber)
-		{
-			_state = new State();
-			_state->deserialize(s);
-		}
-
-		if (_gui != nullptr)
-			_gui->reconnect();
-
-		if (oldState != nullptr)
-			delete oldState;
-
-		//if (_gui != nullptr && EditorHandle != 0)
-		//{
-		//	_gui->rebuild(EditorHandle);
-		//	EditorHandle = static_cast<HWND>(_gui->getFrame()->getSystemWindow());
-		//}
-
-		PlugHost->Dispatcher(HostTag, FHD_SetNumPresets, 0, _presets.size());
-		PlugHost->Dispatcher(HostTag, FHD_SetNumParams, 0, _state->all.size());
-		ProcessAllParams();
-	}
+    // The Windows implementation wrote a 32-bit unsigned long, including
+    // the low 32 bits of these original constants. Keep that exact format.
+    constexpr uint32_t magicNumber = static_cast<uint32_t>(13118359537711872022ULL);
+    constexpr uint32_t legacyMagicNumber = static_cast<uint32_t>(14928659832781827043ULL);
+    StreamWrapper stream(Stream);
+    try
+    {
+        if (Save)
+        {
+            stream.writeUInt(magicNumber);
+            _state->serialize(&stream);
+            return;
+        }
+        const uint32_t magic = stream.readUInt();
+        if (magic != magicNumber && magic != legacyMagicNumber)
+            return;
+        std::unique_ptr<State> state(new State());
+        if (magic == legacyMagicNumber)
+        {
+            stream.readInt(); // legacy stream size
+            state->legacy_deserialize(&stream);
+        }
+        else
+            state->deserialize(&stream);
+        State* oldState = _state;
+        _state = state.release();
+        if (_gui) _gui->reconnect();
+        delete oldState;
+        _midiPatchStatusCache.clear();
+        _midiPanCache.clear();
+        _midiVolumeCache.clear();
+        _midiPitchCache.clear();
+        _ccHistory.clear();
+        PlugHost->Dispatcher(HostTag, FHD_SetNumPresets, 0, _presets.size());
+        PlugHost->Dispatcher(HostTag, FHD_SetNumParams, 0, _state->all.size());
+        ProcessAllParams();
+    }
+    catch (const std::exception&)
+    {
+        // Host callbacks must not propagate C++ exceptions. Keep the current
+        // state when an incomplete or incompatible preset cannot be loaded.
+    }
 }
 
 enum class AutomationTypeFlags
@@ -323,17 +330,32 @@ intptr_t _stdcall Plugin::Dispatcher(intptr_t ID, intptr_t Index, intptr_t Value
 
 			// open editor
 			_gui = new PluginGUI(this);
+#ifdef __APPLE__
+            if (!_gui->open(reinterpret_cast<void*>(Value)))
+            {
+                delete _gui;
+                _gui = nullptr;
+                return 0;
+            }
+            EditorHandle = reinterpret_cast<HWND>(_gui->nativeView());
+            PlugHost->Dispatcher(HostTag, FHD_EditorResized, 0, 0);
+#else
 			_gui->open(reinterpret_cast<HWND>(Value));
 			_gui->getFrame()->takeFocus();
 
 			//_gui->getFrame()->getSystemWindow
 
 			EditorHandle = static_cast<HWND>(_gui->getFrame()->getSystemWindow());
+#endif
 		}
 		else
 		{
 			// change parent window ?
+#ifdef __APPLE__
+            _gui->reparent(reinterpret_cast<void*>(Value));
+#else
 			::SetParent(EditorHandle, reinterpret_cast<HWND>(Value));
+#endif
 		}
 	}
 	else if (ID == FPD_SetPreset)
@@ -489,14 +511,14 @@ int _stdcall Plugin::ProcessParam(int index, int value, int RECFlags)
 
 	if ((int)type & (int)AutomationTypeFlags::UpdateValue)
 	{
-		int max = param->getMax();
 		if (param != nullptr)
 		{
 			param->set4ByteValue(&value);
 			if (param->refreshCluster && param->midi.enabled != nullptr)
 			{
 				param->refreshCluster = false;
-				_gui->setParameter(param->midi.enabled->hash, 1);
+                if (_gui != nullptr)
+				    _gui->setParameter(param->midi.enabled->hash, 1);
 			}
 
 			if ((param->midiTrigger & MidiTrigger::BankChange) != MidiTrigger::None)
@@ -724,7 +746,7 @@ void _stdcall Plugin::NewTick()
 
 			byte writeVelocity = n->velocity;
 			if (_state->legacy)
-				writeVelocity = (byte)min((n->channelVolume) * 127, 127);
+				writeVelocity = (byte)std::fmin((n->channelVolume) * 127, 127);
 			else if (_state->enableNoteVelocity.value)
 				writeVelocity = 127; //Velocity override uses midi channel volume to control note volume instead of velocity
 
@@ -774,7 +796,7 @@ TVoiceHandle _stdcall Plugin::TriggerVoice(PVoiceParams VoiceParams, intptr_t Se
 	{
 		int ret = PlugHost->Voice_ProcessEvent(SetTag, FPV_GetVelocity, 0, 0);
 		float vel = *(float*)&ret;
-		n->midiVelocity = min(std::roundf(vel * 127), 127);
+		n->midiVelocity = std::fmin(std::roundf(vel * 127), 127);
 
 		PlugHost->Voice_ProcessEvent(SetTag, FPV_SetLinkVelocity, 0, 0);
 	}
@@ -943,9 +965,9 @@ void Plugin::UpdateNoteControls(Note* note)
 				NoteControlIndex idx = (NoteControlIndex)((int)(i / 2));
 				float controlVal = (idx == NoteControlIndex::Control1 ? note->control1 : note->control2);
 				if (type == NoteControlType::Upper)
-					controlVal = max(controlVal, 0.0f);
+					controlVal = std::fmax(controlVal, 0.0f);
 				else
-					controlVal = min(controlVal, 0.0f) * -1;
+					controlVal = std::fmin(controlVal, 0.0f) * -1;
 
 				if (controlVal != _state->assignedPartialNoteControls[i].previousWrite)
 				{
@@ -1113,12 +1135,10 @@ void Plugin::WritePan(Note* note)
 	if (!_state->enableNotePanning.value)
 		return;
 
-	byte lastSend = 256;
+	int lastSend = 256;
 	int outHash = _state->port.value + ((note->channel + 4538) * 3029);
 	auto it = _midiPanCache.find(outHash);
-	if (it == _midiPanCache.end())
-		_midiPanCache[outHash] = lastSend = 256;
-	else
+	if (it != _midiPanCache.end())
 		lastSend = (*it).second;
 
 	byte maxSendPan = 127;
@@ -1142,7 +1162,7 @@ void Plugin::WriteVolume(Note* note)
 			return;
 
 		volume *= 127;
-		volume = (byte)min((note->channelVolume * 1.45f) * 127, 127);
+		volume = (byte)std::fmin((note->channelVolume * 1.45f) * 127, 127);
 	}
 	else
 	{
@@ -1151,16 +1171,14 @@ void Plugin::WriteVolume(Note* note)
 		else
 		{
 			//Offset by changing note velocity to allow volume slides
-			volume = max(0, min(volume + (note->velocity - note->initialVelocity), 127));
+			volume = std::fmax(0, std::fmin(volume + (note->velocity - note->initialVelocity), 127));
 		}
 	}
 
-	byte lastSend = 256;
+	int lastSend = 256;
 	int outHash = _state->port.value + ((note->channel + 4538) * 3029);
 	auto it = _midiVolumeCache.find(outHash);
-	if (it == _midiVolumeCache.end())
-		_midiVolumeCache[outHash] = lastSend = 256;
-	else
+	if (it != _midiVolumeCache.end())
 		lastSend = (*it).second;
 
 	if (lastSend == 256 || volume != lastSend)

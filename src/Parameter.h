@@ -1,6 +1,8 @@
 #pragma once
 #include "Serializable.h"
 #include <vector>
+#include <cfloat>
+#include <cwchar>
 
 enum class MidiTrigger
 {
@@ -94,7 +96,7 @@ struct ParameterLink : PlugParameter
 {
 	ParameterLink(std::wstring name, std::wstring id);
 
-	virtual void setFromString(std::wstring value) { value = _wtoi(value.c_str()); }
+	virtual void setFromString(std::wstring value) { linkHash = static_cast<unsigned int>(std::wcstoul(value.c_str(), nullptr, 10)); }
 	virtual std::wstring toString() { return std::to_wstring(linkHash); }
 
 	virtual void serialize(Stream* s);
@@ -146,7 +148,7 @@ struct ParameterFloat : PlugParameter
 	virtual void legacy_deserialize(Stream* s);
 	virtual void setFromString(std::wstring value) 
 	{
-		value = _wtof(value.c_str()); 
+		this->value = std::wcstod(value.c_str(), nullptr);
 		if (this->value > this->_max)
 			this->value = this->_max;
 		if (this->value < this->_min)
@@ -216,7 +218,7 @@ struct ParameterInt : PlugParameter
 
 	virtual void setFromString(std::wstring value) 
 	{
-		this->value = _wtoi(value.c_str());
+		this->value = static_cast<int>(std::wcstol(value.c_str(), nullptr, 10));
 		if (this->value > this->_max)
 			setValue(this->_max);
 
@@ -229,6 +231,8 @@ struct ParameterInt : PlugParameter
 	int value;
 
 	virtual float getMin() override { return _min; }
+	virtual int getMidiMin() override { return _min; }
+	virtual int getMidiMax() override { return _max; }
 	virtual void setMin(float val) override
 	{
 		if (_min != val)

@@ -5,6 +5,7 @@ class IStream;
 class Stream
 {
 public:
+	virtual ~Stream() = default;
 	virtual void advance(int bytes) = 0;
 	virtual int getPosition() = 0;
 	virtual void setPosition(int bytes) = 0;
@@ -72,6 +73,7 @@ public:
 	DataStream(const void* data, int size);
 	DataStream(int startingSize = 256);
 	~DataStream();
+	const char* data() const { return _data; }
 
 	void advance(int bytes) override;
 	int getPosition() override;

@@ -3,6 +3,7 @@
 #include "fp_def.h"
 #include "Scale.h"
 #include <unordered_set>
+#include <map>
 
 struct FruityPlugInfo
 {
@@ -46,7 +47,7 @@ struct Note
 
 	//Bendy specific
 	char harmonic = 0;
-	char startingNote = 255;
+	byte startingNote = 255;
 	int lastSetVolume = -1;
 	float vibratoSin = 0.0f;
 	float vibratoLerp = 0;

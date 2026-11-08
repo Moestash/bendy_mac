@@ -414,6 +414,7 @@ FodyWeavers.xsd
 *.msm
 *.msp
 /bin
+/build-macos*/
 /resource_builder/bin
 /resource_builder/obj
 /resource_builder/.vs

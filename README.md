@@ -65,3 +65,64 @@ These automatically hook up some common controls to BENDY's CC knobs, Cutoff and
 If you run into any problems, especially crashes, or if you want a preset added, please open an issue here or email me at superjoebob@gmail.com!
 
 This plugin uses Steinberg's VSTGUI: https://github.com/steinbergmedia/vstgui
+
+## Building on macOS
+
+Requires macOS 11 or newer, Xcode Command Line Tools (or Xcode), and CMake 3.20+.
+Install the command line tools with `xcode-select --install` if needed. With
+Homebrew, CMake can be installed with `brew install cmake`.
+
+From this repository's directory:
+
+```sh
+cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake --build build-macos --parallel
+ctest --test-dir build-macos --output-on-failure
+```
+
+The resulting **`build-macos/BENDY/BENDY_x64.dylib`** is a universal FL Studio
+native plugin for Apple Silicon and Intel. The `_x64` filename follows FL
+Studio's native plugin naming convention; both architectures are included.
+The build ad-hoc signs the library for local use. No third-party GUI library,
+Windows resource builder, or .NET installation is required on macOS.
+
+Quit FL Studio, then install into your actual FL Studio app:
+
+```sh
+./scripts/install-macos.sh "/Applications/FL Studio 2026.app"
+```
+
+The installer copies the library and `Plugin.nfo` into
+`Contents/Resources/FL/Plugins/Fruity/Generators/BENDY/` within that app and
+backs up an existing BENDY installation before replacing its files. Use your
+installed app's name if it differs. Administrator access may be needed if the
+app is not writable. FL Studio updates may require reinstalling BENDY.
+Refresh FL Studio's plugin list and add BENDY as a native generator. This
+library is not a VST or Audio Unit and does not belong in `Library/Audio/Plug-Ins`.
+
+macOS uses a Cocoa editor with tabs for notes/routing, MIDI CC, envelope, and
+harmony/vibrato. The **•••** buttons expose FL Studio's automation menu, custom
+parameter ranges, and full/upper/lower note-control assignment. CC names and
+numbers are editable. A mixed-state enable checkbox means the CC has not yet
+been activated; changing its value enables it. Factory presets are available
+in the editor and through FL Studio. The Windows VSTGUI editor remains in use
+for Windows builds.
+
+The port preserves the existing parameter IDs/indexes and Windows state wire
+format (32-bit header and UTF-16 strings). Automated tests cover Unicode state
+round trips, Windows-format byte fixtures, malformed-state handling, MIDI
+note/bend output, and dynamic loading through `CreatePlugInstance`.
+An additional Cocoa integration test checks editing, state restoration,
+reparenting, and cleanup; run it in a macOS desktop session:
+
+```sh
+./build-macos/bendy_tests --gui
+```
+
+The port has been built and tested with a mock FL Studio host on Apple Silicon
+and under Rosetta for Intel. The Cocoa editor integration test and an Apple
+Silicon AddressSanitizer/UndefinedBehaviorSanitizer run also pass.
+Playback and project compatibility inside the
+actual FL Studio host still require validation; the Windows build has not
+been rebuilt as part of this port. For distribution beyond local use, supply
+your own Developer ID signing/notarization workflow.
